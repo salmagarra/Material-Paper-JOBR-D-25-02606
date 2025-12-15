@@ -1,6 +1,6 @@
 # Materials  
-**Journal of Business Research (JOBR-D-25-02606)**
-- This repository contains the data and R scripts required to replicate the empirical analyses reported in the paper:
+**Journal of Business Research (JOBR-D-25-02606)** 
+This repository contains the data and R scripts required to replicate the empirical analyses reported in the paper:
 > **Modern Slavery as Tail Risk: An Extreme Value Theory Analysis of ESG, Agrifood, and Financial Sectors**
 
 All methodological details, model specifications, and interpretations are presented in the paper.  
