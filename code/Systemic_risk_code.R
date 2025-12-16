@@ -1,57 +1,80 @@
-library(dplyr)
-library(tidyr)
-library(writexl)
-etf  <- read.csv("etf_clean_returns.csv")
-cond <- read.csv("conditioning_factors.csv")
-etf$Date  <- as.Date(etf$Date)
-cond$Date <- as.Date(cond$Date)
-cond_keep <- c("EZA", "IEMG", "XLY", "IYT", "PICK", "RTH")
-cond <- cond %>% filter(Ticker %in% cond_keep)
-etf <- etf %>%
-  group_by(Date, Ticker) %>%
-  summarise(log_ret = mean(log_ret), .groups = "drop")
-cond <- cond %>%
-  group_by(Date, Ticker) %>%
-  summarise(log_ret = mean(log_ret), .groups = "drop")
-etf_w  <- etf  %>% pivot_wider(names_from = Ticker, values_from = log_ret)
-cond_w <- cond %>% pivot_wider(names_from = Ticker, values_from = log_ret)
-data_all <- inner_join(etf_w, cond_w, by = "Date")
-etf_names  <- colnames(etf_w)[-1]
-cond_names <- colnames(cond_w)[-1]
-tail_beta_exact <- function(X, Y, k) {
-  df <- na.omit(data.frame(X = X, Y = Y))
-  N  <- nrow(df)
-  if (N <= k + 5) return(NA_real_)
-  qx <- sort(df$X, decreasing = TRUE)[k]
-  qy <- sort(df$Y, decreasing = TRUE)[k]
-  U <- sum(df$X > qx & df$Y > qy)
-  if (U == 0) return(NA_real_)
-  (N * k) / U
-}
-etf_info <- read.csv("etf_clean_returns.csv") %>%
-  select(Ticker, Sector) %>%
+library(tidyverse)
+library(openxlsx)
+etf <- read_csv("etf_clean_returns.csv")
+factors <- read_csv("conditioning_factors.csv")
+etf_clean <- etf %>%
+  select(Date, Ticker, Sector, log_ret) %>%
+  distinct()  # remove duplicate rows if any
+factors_clean <- factors %>%
+  select(Date, Ticker, log_ret) %>%
   distinct()
-results <- list()
-for (k in c(150, 200)) {
-  systemic_mat <- matrix(
-    NA,
-    nrow = length(etf_names),
-    ncol = length(cond_names),
-    dimnames = list(etf_names, cond_names)
-  )
-  for (e in etf_names) {
-    for (c in cond_names) {
-      systemic_mat[e, c] <- tail_beta_exact(data_all[[e]], data_all[[c]], k)
+common_dates <- intersect(unique(etf_clean$Date),
+                          unique(factors_clean$Date))
+etf_clean <- etf_clean %>% filter(Date %in% common_dates)
+factors_clean <- factors_clean %>% filter(Date %in% common_dates)
+etf_clean <- etf_clean %>% distinct(Date, Ticker, .keep_all = TRUE)
+factors_clean <- factors_clean %>% distinct(Date, Ticker, .keep_all = TRUE)
+etf_wide <- etf_clean %>%
+  pivot_wider(names_from = Ticker, values_from = log_ret)
+factor_wide <- factors_clean %>%
+  pivot_wider(names_from = Ticker, values_from = log_ret)
+df <- etf_wide %>%
+  inner_join(factor_wide, by = "Date") %>%
+  mutate(across(-Date, ~ as.numeric(.)))
+etf_list <- sort(unique(etf_clean$Ticker))
+factor_list <- sort(unique(factors_clean$Ticker))
+sector_map <- etf_clean %>% select(Ticker, Sector) %>% distinct()
+tail_beta <- function(x, y, m = 200) {
+  keep <- complete.cases(x, y)
+  x <- x[keep]
+  y <- y[keep]
+  # need m+1 tail points
+  if (length(x) < m + 1) return(NA_real_)
+  # m-th worst losses (left tail)
+  et <- sort(x)[m + 1]
+  ft <- sort(y)[m + 1]
+  et_idx <- x <= et
+  ft_idx <- y <= ft
+  fext <- sum(ft_idx)
+  if (fext == 0) return(NA_real_)
+  joint <- sum(et_idx & ft_idx)
+  return(joint / fext)
+}
+compute_matrix <- function(df, etfs, factors, m) {
+  out <- matrix(NA_real_,
+                nrow = length(etfs),
+                ncol = length(factors),
+                dimnames = list(etfs, factors))
+  for (e in etfs) {
+    for (f in factors) {
+      out[e,f] <- tail_beta(df[[e]], df[[f]], m = m)
     }
   }
-  systemic_df <- as.data.frame(systemic_mat)
-  final_table <- systemic_df %>%
-    mutate(ETF = rownames(systemic_df)) %>%
-    left_join(etf_info, by = c("ETF" = "Ticker")) %>%
-    rowwise() %>%
-    mutate(Average = mean(c_across(all_of(cond_names)), na.rm = TRUE)) %>%
-    ungroup() %>%
-    select(Sector, ETF, all_of(cond_names), Average)
-  results[[paste0("Systemic_Risk_k", k)]] <- final_table
+  as.data.frame(out)
 }
-write_xlsx(results, "Systemic_Risk_TailBeta_k150_k200.xlsx")
+split_by_sector <- function(res, sector_map) {
+  out <- list()
+  for (sec in unique(sector_map$Sector)) {
+    tickers <- sector_map %>% filter(Sector == sec) %>% pull(Ticker)
+    out[[sec]] <- res[rownames(res) %in% tickers, ]
+  }
+  return(out)
+}
+sector_tables_m200 <- split_by_sector(res_m200, sector_map)
+sector_tables_m150 <- split_by_sector(res_m150, sector_map)
+wb <- createWorkbook()
+for (sec in names(sector_tables_m200)) {
+  addWorksheet(wb, paste0(sec, "_m200"))
+  writeData(wb, paste0(sec, "_m200"),
+            cbind(Ticker = rownames(sector_tables_m200[[sec]]),
+                  sector_tables_m200[[sec]]),
+            rowNames = FALSE)
+}
+for (sec in names(sector_tables_m150)) {
+  addWorksheet(wb, paste0(sec, "_m150"))
+  writeData(wb, paste0(sec, "_m150"),
+            cbind(Ticker = rownames(sector_tables_m150[[sec]]),
+                  sector_tables_m150[[sec]]),
+            rowNames = FALSE)
+}
+saveWorkbook(wb, "tail_beta_results_with_tickers.xlsx", overwrite = TRUE)
