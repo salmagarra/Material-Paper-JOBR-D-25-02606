@@ -1,65 +1,92 @@
-library(data.table)
 library(dplyr)
 library(lubridate)
 library(ggplot2)
-df <- fread("etf_clean_returns.csv")
+df <- read.csv("etf_clean_returns.csv")
 df$Date <- as.Date(df$Date)
-df <- df %>% filter(Sector %in% c("Agrifood", "ESG", "Financial"))
-hill_evt <- function(returns, m = 200, p = 0.001) {
-  losses <- -returns
-  losses <- losses[losses > 0]
-  n <- length(losses)
-  if (n <= m + 1) return(c(alpha = NA, xp = NA, ES = NA))
-  losses <- sort(losses)
-  x_nm <- losses[n - m]
-  tail <- losses[(n - m + 1):n]
-  alpha <- 1 / mean(log(tail / x_nm))
-  xp <- x_nm * (m / (n * p))^(1 / alpha)
-  ES <- ifelse(alpha > 1, xp / (alpha - 1), NA)
-  c(alpha = alpha, xp = xp, ES = ES)
-}
 df <- df %>%
-  mutate(Year = year(Date))
-years <- 2007:2025
-out <- list()
+  filter(Sector %in% c("Agrifood", "ESG", "Financial"))
+df_sector <- df %>%
+  group_by(Date, Sector) %>%
+  summarise(sector_ret = mean(log_ret, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Year = year(Date)) %>%
+  arrange(Sector, Date)
+hill_evt <- function(losses, m_max = 200, p = 0.001) {
+  losses <- as.numeric(losses)
+  losses <- losses[is.finite(losses) & losses > 0 & losses < 0.5]
+  n <- length(losses)
+  if (n < 50) return(NULL)
+  losses <- sort(losses)
+  m <- min(m_max, max(30, floor(0.1 * n)))
+  if (n <= m + 5) return(NULL)
+  tail <- losses[(n - m + 1):n]
+  x_nm <- tail[1]
+  alpha <- 1 / mean(log(tail / x_nm))
+  if (!is.finite(alpha) || alpha <= 1.01) return(NULL)
+  x_p <- x_nm * (m / (n * p))^(1 / alpha)
+  ES_p <- x_p / (alpha - 1)
+  data.frame(
+    alpha = alpha,
+    x_p_0.001 = x_p,
+    ES_xp_0.001 = ES_p
+  )
+}
+years <- sort(unique(df_sector$Year))
+years <- years[years >= min(years) + 6]
+res <- list()
 k <- 1
 for (y in years) {
-  win <- df %>% filter(Year >= y - 6, Year <= y)
+  win <- df_sector %>%
+    filter(Year >= y - 6, Year <= y)
   for (s in unique(win$Sector)) {
-    tmp <- win %>% filter(Sector == s)
-    est <- tmp %>%
-      group_by(Ticker) %>%
-      summarise(
-        t(hill_evt(log_ret)),
-        .groups = "drop"
-      )
-    out[[k]] <- data.frame(
+    losses <- -win$sector_ret[win$Sector == s]
+    evt <- hill_evt(losses)
+
+    if (is.null(evt)) next
+
+    res[[k]] <- data.frame(
       Year = y,
       Sector = s,
-      alpha = mean(est$alpha, na.rm = TRUE),
-      xp_001 = mean(est$xp, na.rm = TRUE),
-      ES_001 = mean(est$ES, na.rm = TRUE)
+      alpha = evt$alpha,
+      x_p_0.001 = evt$x_p_0.001,
+      ES_xp_0.001 = evt$ES_xp_0.001
     )
     k <- k + 1
   }
 }
-rolling_df <- bind_rows(out)
-rolling_df$Sector <- factor(rolling_df$Sector)
-p_alpha <- ggplot(rolling_df, aes(Year, alpha, color = Sector)) +
-  geom_line(linewidth = 1) +
+rolling_evt <- bind_rows(res) %>%
+  filter(Year >= 2007, Year <= 2025)
+rolling_evt$Sector <- factor(rolling_evt$Sector)
+rolling_evt$Year <- as.integer(rolling_evt$Year)
+p_alpha <- ggplot(rolling_evt, aes(Year, alpha, color = Sector)) +
   geom_point(size = 2) +
-  geom_smooth(se = FALSE, method = "loess", span = 0.3) +
-  theme_minimal()
-p_xp <- ggplot(rolling_df, aes(Year, xp_001, color = Sector)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.1) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.3, linewidth = 1) +
+  scale_x_continuous(breaks = 2007:2025, limits = c(2007, 2025)) +
+  labs(x = "Year", y = "Tail index (alpha)") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+p_xp <- ggplot(rolling_evt, aes(Year, x_p_0.001, color = Sector)) +
   geom_point(size = 2) +
-  geom_smooth(se = FALSE, method = "loess", span = 0.3) +
-  theme_minimal()
-p_ES <- ggplot(rolling_df, aes(Year, ES_001, color = Sector)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.1) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.3, linewidth = 1) +
+  scale_x_continuous(breaks = 2007:2025, limits = c(2007, 2025)) +
+  labs(
+    x = "Year",
+    y = expression("Tail quantile  x"[p] * "  (p = 0.001)")
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+p_es <- ggplot(rolling_evt, aes(Year, ES_xp_0.001, color = Sector)) +
   geom_point(size = 2) +
-  geom_smooth(se = FALSE, method = "loess", span = 0.3) +
-  theme_minimal()
-ggsave("rolling_alpha.png", p_alpha, width = 9, height = 4, dpi = 300)
-ggsave("rolling_xp001.png", p_xp, width = 9, height = 4, dpi = 300)
-ggsave("rolling_ES001.png", p_ES, width = 9, height = 4, dpi = 300)
+  geom_line(linewidth = 1.1) +
+  geom_smooth(se = FALSE, method = "loess", span = 0.3, linewidth = 1) +
+  scale_x_continuous(breaks = 2007:2025, limits = c(2007, 2025)) +
+  labs(
+    x = "Year",
+    y = expression("Expected Shortfall  ES"[p] * "  (p = 0.001)")
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ggsave("rolling_tail_alpha.png", p_alpha, width = 10, height = 5, dpi = 300)
+ggsave("rolling_tail_quantile_xp001.png", p_xp, width = 10, height = 5, dpi = 300)
+ggsave("rolling_tail_ES_p001.png", p_es, width = 10, height = 5, dpi = 300)
