@@ -1,5 +1,5 @@
 library(tidyverse)
-dir.create("outputs", showWarnings = FALSE)
+etf  <- read.csv("etf_clean_returns.csv")
 p_values <- c(0.001, 0.002)
 compute_evt <- function(returns, m, p_values) {
   losses <- -returns
